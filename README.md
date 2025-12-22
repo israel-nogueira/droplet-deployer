@@ -45,8 +45,8 @@ Antes de começar, você precisará das seguintes credenciais:
 ### 1. Clonar o repositório
 
 ```bash
-git clone https://github.com/seu-usuario/bunker-droplet-deployer.git
-cd bunker-droplet-deployer
+git clone https://github.com/israel-nogueira/droplet-deployer.git
+cd droplet-deployer
 chmod +x index.sh setup.sh
 
 ```
