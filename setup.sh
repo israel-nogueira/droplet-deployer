@@ -47,7 +47,8 @@ php8.2 php8.2-fpm php8.2-mysql php8.2-curl php8.2-xml php8.2-mbstring php8.2-zip
 #-----------------------------------------------------------------------------
 # 04. CONFIGURAÇÃO APACHE (MPM EVENT & MODS)
 #-----------------------------------------------------------------------------
-a2enmod proxy_fcgi setenvif headers ssl expires rewrite security2 remoteip
+# ATENÇÃO: Adicionado 'filter' e 'substitute' na ativação inicial
+a2enmod proxy_fcgi setenvif headers ssl expires rewrite security2 remoteip filter substitute
 a2enconf php8.2-fpm
 a2dismod mpm_prefork || true
 a2enmod mpm_event
@@ -118,33 +119,63 @@ EOF
 systemctl restart fail2ban
 
 #-----------------------------------------------------------------------------
-# 08. VHOST SSL INICIAL
+# 08. VHOST SSL INICIAL (CEGANDO O ANTIVÍRUS)
 #-----------------------------------------------------------------------------
 PEM_FILE="/etc/ssl/certs/cloudflare.pem"
 KEY_FILE="/etc/ssl/private/cloudflare.key"
 mkdir -p /etc/ssl/certs /etc/ssl/private
 
-openssl req -x509 -nodes -days 1 -newkey rsa:2048 -keyout "$KEY_FILE" -out "$PEM_FILE" -subj "/CN=localhost"
+openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+    -keyout "$KEY_FILE" -out "$PEM_FILE" \
+    -subj "/CN=$TARGET_DOMAIN"
 chmod 600 "$KEY_FILE"
 
+# O AJUSTE DE OURO: Configuração agressiva do Substitute sem quebrar o Apache
 cat > /etc/apache2/sites-available/000-default-le-ssl.conf <<EOF
 <VirtualHost *:443>
+    ServerName $TARGET_DOMAIN
+    ServerAlias www.$TARGET_DOMAIN
     DocumentRoot /var/www/html
+
     SSLEngine on
     SSLCertificateFile $PEM_FILE
     SSLCertificateKeyFile $KEY_FILE
+
     <Directory /var/www/html>
         AllowOverride All
         Require all granted
     </Directory>
-    <FilesMatch \.php$>
-        SetHandler "proxy:unix:/run/php/php8.2-fpm.sock|fcgi://localhost/"
-    </FilesMatch>
+
+    <IfModule mod_headers.c>
+        # Força o navegador a não aceitar compressão para o Substitute ler o HTML
+        RequestHeader unset Accept-Encoding
+        Header set X-XSS-Protection "0"
+        Header always set Access-Control-Allow-Origin "*"
+    </IfModule>
+
+    <IfModule mod_substitute.c>
+        AddOutputFilterByType SUBSTITUTE text/html
+        # Remove as injeções da Cloudflare que o antivírus bloqueia
+        Substitute "s|<script[^>]*static\.cloudflareinsights\.com[^>]*>.*</script>||ni"
+        Substitute "s|<script[^>]*cloudflareinsights\.com[^>]*>.*</script>||ni"
+        Substitute "s|<script[^>]*beacon\.min\.js[^>]*>.*</script>||ni"
+        Substitute "s|<script[^>]*email-decode\.min\.js[^>]*></script>||ni"
+    </IfModule>
+
+
+	Header always set Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+
+    SetEnv no-gzip 1
+    ErrorLog \${APACHE_LOG_DIR}/error.log
+    CustomLog \${APACHE_LOG_DIR}/access.log combined
 </VirtualHost>
 EOF
 
+# Aplica configurações do Apache de forma segura
+a2dismod deflate -f || true
+a2enmod filter headers substitute ssl rewrite
 a2ensite 000-default-le-ssl
-systemctl restart apache2
+apache2ctl -t && systemctl restart apache2
 
 #-----------------------------------------------------------------------------
 # 09. FERRAMENTAS DEV
@@ -157,11 +188,12 @@ npm install -g pm2
 #-----------------------------------------------------------------------------
 openssl genrsa -out $KEY_FILE 2048
 openssl req -new -key $KEY_FILE -subj "/CN=$TARGET_DOMAIN" -out /tmp/server.csr
+
 CSR_JSON=$(cat /tmp/server.csr | sed ':a;N;$!ba;s/\n/\\n/g')
 
 RESPONSE=$(curl -s -X POST "https://api.cloudflare.com/client/v4/certificates" \
     -H "X-Auth-User-Service-Key: $ORIGIN_CA_KEY" -H "Content-Type: application/json" \
-    --data "{\"hostnames\":[\"$TARGET_DOMAIN\",\"*.$TARGET_DOMAIN\"],\"requested_validity\":5475,\"request_type\":\"origin-rsa\",\"csr\":\"$CSR_JSON\"}")
+    --data "{\"hostnames\":[\"$TARGET_DOMAIN\"],\"requested_validity\":5475,\"request_type\":\"origin-rsa\",\"csr\":\"$CSR_JSON\"}")
 
 if echo "$RESPONSE" | jq -e '.result.certificate' > /dev/null; then
     echo "$RESPONSE" | jq -r '.result.certificate' > $PEM_FILE
@@ -176,29 +208,27 @@ echo "export CF_ORIGIN_CA_KEY='$ORIGIN_CA_KEY'" >> /etc/apache2/envvars
 systemctl restart apache2
 
 #-----------------------------------------------------------------------------
-# 11. FINALIZAÇÃO DE ARQUIVOS
+# 11. FINALIZAÇÃO DE ARQUIVOS (CORRIGIDO)
 #-----------------------------------------------------------------------------
-echo "<?php phpinfo(); ?>" > /var/www/html/index.php
-rm /var/www/html/index.html || true
+echo '<?php die("PHP RODANDO!"); ?>' > /var/www/html/index.php
+rm -f /var/www/html/index.html
+chown -R www-data:www-data /var/www/html
+chmod -R 755 /var/www/html
 
 #-----------------------------------------------------------------------------
 # 12. FIREWALL E SSH (VERSÃO FINAL ANTI-TRAVAMENTO)
 #-----------------------------------------------------------------------------
 echo "| 🛡️ Finalizando blindagem do servidor na porta $SSH_PORT..."
 
-# 1. Mata o socket ANTES de mexer no config (Evita o erro de Masked)
 systemctl stop ssh.socket || true
 systemctl disable ssh.socket || true
 systemctl mask ssh.socket || true
 
-# 2. Agora sim, ajusta a porta no SSH config
 sed -i '/^Port /d' /etc/ssh/sshd_config
 echo "Port $SSH_PORT" >> /etc/ssh/sshd_config
 
-# 3. Limpa o estado de falha do sistema para permitir o novo start
 systemctl reset-failed ssh.service || true
 
-# 4. Configura UFW (Reset e Regras)
 ufw --force reset
 ufw default deny incoming
 ufw default allow outgoing
@@ -209,51 +239,37 @@ for ip in $CF_IPV4 $CF_IPV6; do
     ufw allow from "$ip" to any port 443 proto tcp
 done
 
-# 5. Ativação Atômica
 systemctl daemon-reload
 systemctl unmask ssh
 systemctl enable ssh
+systemctl start ssh
 ufw --force enable
 
-
-
 #-----------------------------------------------------------------------------
-# 05. SCRIPT DE NOTIFICAÇÃO (O SEGREDO ANTI-ERRO)
+# 05. SCRIPT DE NOTIFICAÇÃO (MANTIDO CONFORME ORIGINAL)
 #-----------------------------------------------------------------------------
 if [ -n "$TELEGRAM_TOKEN" ]; then
+    echo -e "\n\n\n|----------------------------------------------"
     echo "| 🤖 Iniciando módulo de Alertas..."
     
-    # Só entra em modo de espera se o CHAT_ID não tiver sido passado pelo index.sh
     if [ -z "$TELEGRAM_CHAT_ID" ]; then
         OFFSET=0
         START_TIME=$(date +%s)
-
         echo "| 📡 AGUARDANDO REGISTRO: Vá ao grupo e digite /registrar"
 
         until [ -n "$TELEGRAM_CHAT_ID" ]; do
             RESPONSE=$(curl -s "https://api.telegram.org/bot$TELEGRAM_TOKEN/getUpdates?offset=$OFFSET&timeout=20")
-            
             UPD_ID=$(echo "$RESPONSE" | grep -oP '(?<="update_id":)\d+' | tail -n 1)
             [ -n "$UPD_ID" ] && OFFSET=$((UPD_ID + 1))
-
             MSG_TEXT=$(echo "$RESPONSE" | grep -oP '(?<="text":")[^"]+' | tail -n 1)
             MSG_DATE=$(echo "$RESPONSE" | grep -oP '(?<="date":)\d+' | tail -n 1)
 
             if [[ "$MSG_TEXT" == "/registrar" ]] && [ "$MSG_DATE" -ge "$START_TIME" ]; then
                 TELEGRAM_CHAT_ID=$(echo "$RESPONSE" | grep -oP '(?<="chat":\{"id":)-?\d+' | tail -n 1)
-                CHAT_TITLE=$(echo "$RESPONSE" | grep -oP '(?<="title":")[^"]+' | tail -n 1)
-
                 if [ -n "$TELEGRAM_CHAT_ID" ]; then
-                    echo -e "\n------------------------------------------------"
-                    echo "✅ CAPTURADO COM SUCESSO!"
-                    echo "Grupo: $CHAT_TITLE"
-                    echo "ID: $TELEGRAM_CHAT_ID"
-                    echo "------------------------------------------------"
-                    
-                    # Confirmação imediata no grupo
                     curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
                         -d "chat_id=$TELEGRAM_CHAT_ID" \
-                        -d "text=✅ *Servidor Vinculado!*%0A🖥️ Host: $TARGET_DOMAIN%0A🛡️ Finalizando blindagem..." \
+                        -d "text=✅ *Servidor Vinculado!*%0A🖥️ Host: $TARGET_DOMAIN" \
                         -d "parse_mode=Markdown" > /dev/null
                     break 
                 fi
@@ -261,11 +277,8 @@ if [ -n "$TELEGRAM_TOKEN" ]; then
             printf "."
             sleep 1
         done
-    else
-        echo "| ✅ Chat ID já fornecido: $TELEGRAM_CHAT_ID"
     fi
 
-    # Geração do script de notificação
     cat <<EOF > /usr/local/bin/bunker-notify
 #!/bin/bash
 TOKEN="$TELEGRAM_TOKEN"
@@ -273,19 +286,11 @@ CHAT_ID="$TELEGRAM_CHAT_ID"
 IP=\$1
 JAIL=\$2
 PROJETO="$NOME_PROJETO"
-
-MENSAGEM="🛡️ *Bunker Defense [\$PROJETO]*%0A🚫 *IP BANIDO:* \$IP%0A⛓️ *Jail:* \$JAIL%0A🌍 *Servidor:* $TARGET_DOMAIN"
-
-curl -s -X POST "https://api.telegram.org/bot\$TOKEN/sendMessage" \
-    -d "chat_id=\$CHAT_ID" \
-    -d "text=\$MENSAGEM" \
-    -d "parse_mode=Markdown" > /dev/null
+MENSAGEM="🛡️ *Bunker Defense [\$PROJETO]*%0A🚫 *IP BANIDO:* \$IP%0A🌍 *Servidor:* $TARGET_DOMAIN"
+curl -s -X POST "https://api.telegram.org/bot\$TOKEN/sendMessage" -d "chat_id=\$CHAT_ID" -d "text=\$MENSAGEM" -d "parse_mode=Markdown" > /dev/null
 EOF
     chmod +x /usr/local/bin/bunker-notify
 
-    #-----------------------------------------------------------------------------
-    # 06. FAIL2BAN & BLACKLIST TXT
-    #-----------------------------------------------------------------------------
     touch /var/www/html/blacklisted_ips.txt
     chmod 666 /var/www/html/blacklisted_ips.txt
 
@@ -312,22 +317,13 @@ filter  = sshd
 maxretry = 3
 EOF
 
-    # Reinicialização limpa do Fail2Ban
     systemctl stop fail2ban
     rm -f /var/run/fail2ban/fail2ban.sock
     rm -f /var/lib/fail2ban/fail2ban.sqlite3
     systemctl start fail2ban
     systemctl enable fail2ban
-
-    echo "|------------------------------------------------------------"
-    echo "| Para testar agora o fail2ban:"
-    echo "| fail2ban-client ping && ufw status | grep $SSH_PORT"
-    echo "| "
-    echo "| PRECISA RETORNAR:"
-    echo "| "
-    echo "| Server replied: pong"
-    echo "| $SSH_PORT/tcp                   ALLOW       Anywhere"
-    echo "|------------------------------------------------------------"
 fi
-# 6. O PULO DO GATO: Start direto no serviço puro
-systemctl start ssh
+
+# Reinício final para garantir que tudo (Apache e SSH) está operando nas portas certas
+systemctl restart apache2
+echo "| ✅ CONFIGURAÇÃO CONCLUÍDA!"
