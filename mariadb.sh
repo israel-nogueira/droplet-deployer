@@ -2,15 +2,6 @@
 set -e
 
 #-----------------------------------------------------------------------------
-# 00. VARIÁVEIS DE CONFIGURAÇÃO (Segurança e Rede)
-#-----------------------------------------------------------------------------
-	# SSH_PORT="2222"
-	# DB_PORT="3307"
-	# URL_DB="mariadb.nexdigital.app"
-	# DB_ROOT_PASSWORD="2025@Lottun"      
-	# DB_SYSTEM_PASSWORD="2025@passwordDificildaBixiga"      
-
-#-----------------------------------------------------------------------------
 # 01. PREPARO, REPOSITÓRIOS E TRAVAS DE APT
 #-----------------------------------------------------------------------------
 if [ "$(id -u)" -ne 0 ]; then echo "Erro: root necessário"; exit 1; fi
