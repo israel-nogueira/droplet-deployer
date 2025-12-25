@@ -58,6 +58,10 @@ systemctl start php8.2-fpm
 echo "ServerTokens Prod" >> /etc/apache2/conf-available/security.conf
 echo "ServerSignature Off" >> /etc/apache2/conf-available/security.conf
 
+# Define o caminho do arquivo
+PHP_INI="/etc/php/8.2/fpm/php.ini"
+sed -i "s|^;*include_path =.*|include_path = \".:/usr/share/php:/var/www/html\"|" $PHP_INI
+systemctl restart php8.2-fpm
 a2enconf security
 systemctl restart apache2
 
@@ -206,7 +210,7 @@ echo "export CF_EMAIL='$CF_EMAIL'" >> /etc/apache2/envvars
 echo "export CF_API_KEY='$CF_API_KEY'" >> /etc/apache2/envvars
 echo "export CF_ORIGIN_CA_KEY='$ORIGIN_CA_KEY'" >> /etc/apache2/envvars
 systemctl restart apache2
-
+# mariadb -u root -p -P 3307 boxwell01 < bkp_boxwell_01___15-12-25.SQL
 #-----------------------------------------------------------------------------
 # 11. FINALIZAÇÃO DE ARQUIVOS (CORRIGIDO)
 #-----------------------------------------------------------------------------
