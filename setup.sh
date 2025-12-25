@@ -58,9 +58,67 @@ systemctl start php8.2-fpm
 echo "ServerTokens Prod" >> /etc/apache2/conf-available/security.conf
 echo "ServerSignature Off" >> /etc/apache2/conf-available/security.conf
 
-# Define o caminho do arquivo
+echo "-----------------------------------------------------------------------------"
+echo " 04.5 Configurando PHP 8.2"
+echo "-----------------------------------------------------------------------------"
+
 PHP_INI="/etc/php/8.2/fpm/php.ini"
+PREPEND="/var/www/html/auto_prepend_file.php"
+APPEND="/var/www/html/auto_append_file.php"
+FUNCOES="exec,passthru,shell_exec,system,proc_open,popen,curl_multi_exec,parse_ini_file,show_source"
+
+# --- 1. Caminhos e Inclusões Automáticas ---
+# Garante que o PHP ache os arquivos na raiz e carregue o Wrapper de compatibilidade
 sed -i "s|^;*include_path =.*|include_path = \".:/usr/share/php:/var/www/html\"|" $PHP_INI
+sed -i "s|^;*auto_prepend_file =.*|auto_prepend_file = \"$PREPEND\"|" $PHP_INI
+sed -i "s|^;*auto_append_file =.*|auto_append_file = \"$APPEND\"|" $PHP_INI
+
+# --- 2. Compatibilidade de Sintaxe e Buffer ---
+# Essencial para aceitar <? e evitar erro de "Headers already sent"
+sed -i "s/^short_open_tag =.*/short_open_tag = On/" $PHP_INI
+sed -i "s/^output_buffering =.*/output_buffering = 4096/" $PHP_INI
+sed -i "s/^request_order =.*/request_order = \"GPC\"/" $PHP_INI
+
+# --- 3. Tratamento de Erros e Logs ---
+# Mostra erros mas esconde avisos de funções depreciadas do PHP 8.2
+sed -i "s/^display_errors =.*/display_errors = On/" $PHP_INI
+sed -i "s/^error_reporting =.*/error_reporting = E_ALL \& ~E_DEPRECATED \& ~E_STRICT/" $PHP_INI
+
+# --- 4. Limites de Recursos e Upload ---
+# Aumenta memória e limites para suportar formulários e arquivos grandes
+sed -i "s/^memory_limit =.*/memory_limit = 512M/" $PHP_INI
+sed -i "s/^;*max_input_vars =.*/max_input_vars = 5000/" $PHP_INI
+sed -i "s/^upload_max_filesize =.*/upload_max_filesize = 100M/" $PHP_INI
+sed -i "s/^post_max_size =.*/post_max_size = 108M/" $PHP_INI
+
+# --- 5. Sessões e Regionalização ---
+# Fuso horário e sessões persistentes para evitar deslogues repentinos
+sed -i "s/^session.gc_maxlifetime =.*/session.gc_maxlifetime = 28800/" $PHP_INI
+sed -i "s/^session.use_only_cookies =.*/session.use_only_cookies = 1/" $PHP_INI
+sed -i "s|^;date.timezone =.*|date.timezone = \"America/Sao_Paulo\"|" $PHP_INI
+
+# --- 6. Segurança e Performance (OPcache) ---
+# Bloqueia funções perigosas e configura o cache de scripts
+sed -i "s/^disable_functions =.*/disable_functions = $FUNCOES/" $PHP_INI
+sed -i "s/^;*opcache.enable=.*/opcache.enable=1/" $PHP_INI
+sed -i "s/^;*opcache.revalidate_freq=.*/opcache.revalidate_freq=2/" $PHP_INI
+sed -i "s/^;*opcache.memory_consumption=.*/opcache.memory_consumption=256/" $PHP_INI
+sed -i "s/^;*opcache.max_accelerated_files=.*/opcache.max_accelerated_files=20000/" $PHP_INI
+
+
+cat << 'EOF' > $APPEND 
+<? ?>
+EOF
+
+cat << 'EOF' > $PREPEND 
+<? ?>
+EOF
+
+chown www-data:www-data $APPEND
+chown www-data:www-data $PREPEND
+chmod 644 $APPEND
+chmod 644 $PREPEND
+
 systemctl restart php8.2-fpm
 a2enconf security
 systemctl restart apache2
